@@ -20,9 +20,20 @@ jobs:
           sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip python3-venv autoconf automake libtool libtool-bin libltdl-dev pkg-config zlib1g-dev libncurses5-dev libffi-dev cmake libssl-dev
           pip3 install --upgrade buildozer cython
 
-      - name: Build APK
+      - name: Restore keystore
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > gxy-release.keystore
+          ls -la gxy-release.keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+
+      - name: Build signed release APK
         env:
           ACLOCAL_PATH: /usr/share/aclocal
+          P4A_RELEASE_KEYSTORE: gxy-release.keystore
+          P4A_RELEASE_KEYALIAS: gongxueyun
+          P4A_RELEASE_KEYSTORE_PASSWD: ${{ secrets.KEYSTORE_PASSWD }}
+          P4A_RELEASE_KEYALIAS_PASSWD: ${{ secrets.KEYSTORE_PASSWD }}
         run: |
           LIC="24333f8a63b6825ea9c5514f83c2829b004d1fee"
           buildozer android debug || true
@@ -37,11 +48,11 @@ jobs:
               yes | "$SDKMGR" --sdk_root="$SDKROOT" "build-tools;37.0.0" platforms android-33 > /dev/null 2>&1 || true
             fi
           fi
-          buildozer android debug
+          buildozer android release
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: gxy-apk
+          name: gxy-apk-release
           path: bin/*.apk
           retention-days: 30
