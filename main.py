@@ -17,7 +17,17 @@ from kivy.uix.button import Button
 from kivy.uix.togglebutton import ToggleButton
 from kivy.uix.spinner import Spinner
 from kivy.uix.popup import Popup
+from kivy.core.text import LabelBase
 from kivy.core.window import Window
+
+_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "NotoSansSC-Regular.otf")
+if os.path.exists(_FONT_PATH):
+    LabelBase.register(name="Roboto", fn_regular=_FONT_PATH)
+    LabelBase.register(name="RobotoMedium", fn_regular=_FONT_PATH)
+    LabelBase.register(name="RobotoBold", fn_regular=_FONT_PATH)
+    LabelBase.register(name="RobotoItalic", fn_regular=_FONT_PATH)
+    LabelBase.register(name="RobotoMediumItalic", fn_regular=_FONT_PATH)
 
 from gxy_api import GxyClient, GxyError
 
