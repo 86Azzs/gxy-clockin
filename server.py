@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
-"""工学云自动打卡 - 手机浏览器 Web 界面（零额外依赖，标准库 http.server）
+"""工学云自动打卡 - Web 界面（兼容本地直跑 & Render/gunicorn 部署）
 
-运行：python3 server.py
-手机浏览器访问：http://127.0.0.1:18088
+本地直跑：python3 server.py  -> 浏览器访问 http://127.0.0.1:18088
+云端部署：gunicorn server:application   （见 render.yaml / 部署说明）
+
+配置来源优先级：环境变量 GXY_* > config.json
+（Render 免费版文件系统是临时的，账号密码务必用环境变量持久化）
 """
 
 import json
@@ -10,7 +13,6 @@ import os
 import threading
 import datetime
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 from gxy_api import GxyClient, GxyError
@@ -22,12 +24,41 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 LOG_PATH = os.path.join(BASE_DIR, "logs.txt")
 
 
+# ---------------------------------------------------------------- 配置
 def load_config():
+    cfg = {}
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+            cfg = json.load(f)
     except Exception:
-        return {}
+        cfg = {}
+
+    # 环境变量覆盖（云端持久化用）
+    env_map = {
+        "phone": "GXY_PHONE",
+        "password": "GXY_PASSWORD",
+        "token": "GXY_TOKEN",
+        "address": "GXY_ADDRESS",
+        "province": "GXY_PROVINCE",
+        "city": "GXY_CITY",
+        "latitude": "GXY_LATITUDE",
+        "longitude": "GXY_LONGITUDE",
+        "auto_start": "GXY_AUTO_START",
+        "auto_end": "GXY_AUTO_END",
+    }
+    for key, env in env_map.items():
+        v = os.environ.get(env)
+        if v not in (None, ""):
+            cfg[key] = v
+    # 自动打卡开关（环境变量 1/true 开启）
+    v = os.environ.get("GXY_AUTO_ENABLE")
+    if v is not None:
+        cfg["auto_enable"] = v.lower() in ("1", "true", "yes", "on")
+
+    # 默认值
+    cfg.setdefault("auto_start", "08:50")
+    cfg.setdefault("auto_end", "17:30")
+    return cfg
 
 
 def save_config(cfg):
@@ -38,21 +69,31 @@ def save_config(cfg):
         pass
 
 
+# ---------------------------------------------------------------- 日志
+_LOG_LOCK = threading.Lock()
+
+
 def log(msg):
     ts = datetime.datetime.now().strftime("%m-%d %H:%M:%S")
     line = "[%s] %s\n" % (ts, msg)
+    with _LOG_LOCK:
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+        except Exception:
+            pass
+#        # 保留最近 200 行
+#        try:
+#            with open(LOG_PATH, "r", encoding="utf-8") as f:
+#                lines = f.readlines()
+#            if len(lines) > 200:
+#                with open(LOG_PATH, "w", encoding="utf-8") as f:
+#                    f.writelines(lines[-200:])
+#        except Exception:
+#            pass
+    # 同时打印到 stdout（Render 日志可查看）
     try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(line)
-    except Exception:
-        pass
-    # 保留最近 200 行
-    try:
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        if len(lines) > 200:
-            with open(LOG_PATH, "w", encoding="utf-8") as f:
-                f.writelines(lines[-200:])
+        print(line.rstrip(), flush=True)
     except Exception:
         pass
     return line
@@ -66,7 +107,7 @@ def read_logs():
         return ""
 
 
-# 全局配置
+# ---------------------------------------------------------------- 全局配置与客户端
 CFG = load_config()
 CFG_LOCK = threading.Lock()
 
@@ -84,7 +125,24 @@ def make_client(cfg):
     )
 
 
-# ---------------- 自动打卡后台线程 ----------------
+# ---------------------------------------------------------------- 打卡核心
+def _do_clock_sync(is_start):
+    try:
+        with CFG_LOCK:
+            cfg = dict(CFG)
+        c = make_client(cfg)
+        title, msg = c.clock_in(is_start)
+        log("%s\n%s" % (title, msg))
+        return True, title + "\n" + msg
+    except GxyError as e:
+        log("打卡错误: %s" % e)
+        return False, "打卡错误: %s" % e
+    except Exception as e:
+        log("打卡异常: %s" % e)
+        return False, "打卡异常: %s" % e
+
+
+# ---------------------------------------------------------------- 自动打卡后台线程
 def auto_loop():
     last_date = None
     done_start = False
@@ -117,23 +175,23 @@ def auto_loop():
             time.sleep(30)
 
 
-def _do_clock_sync(is_start):
-    try:
-        with CFG_LOCK:
-            cfg = dict(CFG)
-        c = make_client(cfg)
-        title, msg = c.clock_in(is_start)
-        log("%s\n%s" % (title, msg))
-        return True, title + "\n" + msg
-    except GxyError as e:
-        log("打卡错误: %s" % e)
-        return False, "打卡错误: %s" % e
-    except Exception as e:
-        log("打卡异常: %s" % e)
-        return False, "打卡异常: %s" % e
+_auto_thread_started = False
+_auto_thread_lock = threading.Lock()
 
 
-# ---------------- HTML 页面 ----------------
+def start_auto_thread():
+    """确保定时线程只启动一次（gunicorn --preload 多进程下也只跑一份）"""
+    global _auto_thread_started
+    with _auto_thread_lock:
+        if _auto_thread_started:
+            return
+        _auto_thread_started = True
+    t = threading.Thread(target=auto_loop, daemon=True)
+    t.start()
+    log("自动打卡后台线程已启动")
+
+
+# ---------------------------------------------------------------- HTML 页面
 PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -225,45 +283,32 @@ loadCfg();
 """
 
 
-class Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
-        if isinstance(body, (dict, list)):
-            body = json.dumps(body, ensure_ascii=False)
-            ctype = "application/json; charset=utf-8"
+# ---------------------------------------------------------------- 请求处理（WSGI）
+def _json_response(body, code=200):
+    if isinstance(body, (dict, list)):
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        ctype = "application/json; charset=utf-8"
+    else:
         data = body.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+        ctype = "text/plain; charset=utf-8"
+    return code, ctype, data
 
-    def _json_body(self):
-        ln = int(self.headers.get("Content-Length", 0) or 0)
-        if ln <= 0:
-            return {}
-        try:
-            return json.loads(self.rfile.read(ln).decode("utf-8"))
-        except Exception:
-            return {}
 
-    def do_GET(self):
-        path = urlparse(self.path).path
-        if path == "/" or path == "/index.html":
-            return self._send(200, PAGE, "text/html; charset=utf-8")
+def handle_request(method, path, body):
+    """返回 (status_code, content_type, bytes)"""
+    if method == "GET":
+        if path in ("/", "/index.html"):
+            return 200, "text/html; charset=utf-8", PAGE.encode("utf-8")
         if path == "/api/status":
             with CFG_LOCK:
                 cfg = dict(CFG)
-            return self._send(200, {"auto_enable": cfg.get("auto_enable", False),
-                                    "config": cfg})
+            return _json_response({"auto_enable": cfg.get("auto_enable", False),
+                                   "config": cfg})
         if path == "/api/logs":
-            return self._send(200, {"logs": read_logs()})
-        return self._send(404, {"msg": "not found"})
+            return _json_response({"logs": read_logs()})
+        return _json_response({"msg": "not found"}, 404)
 
-    def do_POST(self):
-        path = urlparse(self.path).path
-        body = self._json_body()
-
+    if method == "POST":
         if path == "/api/save":
             with CFG_LOCK:
                 for k in ("phone", "password", "token", "address", "province",
@@ -272,29 +317,27 @@ class Handler(BaseHTTPRequestHandler):
                         CFG[k] = body[k]
                 cfg = dict(CFG)
             save_config(cfg)
-            return self._send(200, {"ok": True})
+            return _json_response({"ok": True})
 
         if path == "/api/test":
-            def task():
-                with CFG_LOCK:
-                    cfg = dict(CFG)
-                try:
-                    c = make_client(cfg)
-                    c.login()
-                    c.get_plan()
-                    return {"ok": True, "msg": "登录成功！昵称: %s，计划: %s" % (c.nike_name, c.plan_name)}
-                except GxyError as e:
-                    return {"ok": False, "msg": "登录失败: %s" % e}
-                except Exception as e:
-                    return {"ok": False, "msg": "异常: %s" % e}
-            r = task()
+            with CFG_LOCK:
+                cfg = dict(CFG)
+            try:
+                c = make_client(cfg)
+                c.login()
+                c.get_plan()
+                r = {"ok": True, "msg": "登录成功！昵称: %s，计划: %s" % (c.nike_name, c.plan_name)}
+            except GxyError as e:
+                r = {"ok": False, "msg": "登录失败: %s" % e}
+            except Exception as e:
+                r = {"ok": False, "msg": "异常: %s" % e}
             log("测试登录: %s" % r["msg"])
-            return self._send(200, r)
+            return _json_response(r)
 
         if path == "/api/clock":
             is_start = body.get("is_start", True)
             ok, msg = _do_clock_sync(is_start)
-            return self._send(200, {"ok": ok, "title": msg})
+            return _json_response({"ok": ok, "title": msg})
 
         if path == "/api/auto":
             enable = body.get("enable", False)
@@ -307,23 +350,53 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = dict(CFG)
             save_config(cfg)
             log("自动打卡已%s（上班 %s / 下班 %s）" % ("启用" if enable else "关闭", start, end))
-            return self._send(200, {"ok": True, "msg": "自动打卡已" + ("启用" if enable else "关闭")})
+            return _json_response({"ok": True, "msg": "自动打卡已" + ("启用" if enable else "关闭")})
 
-        return self._send(404, {"msg": "not found"})
+        return _json_response({"msg": "not found"}, 404)
 
-    def log_message(self, *args):
-        pass
+    return _json_response({"msg": "method not allowed"}, 405)
 
 
+def application(environ, start_response):
+    """WSGI 入口，供 gunicorn 加载：gunicorn server:application"""
+    method = environ.get("REQUEST_METHOD", "GET")
+    path = urlparse(environ.get("PATH_INFO", "/")).path
+    # 解析请求体
+    body = {}
+    try:
+        ln = int(environ.get("CONTENT_LENGTH", 0) or 0)
+        if ln > 0:
+            raw = environ["wsgi.input"].read(ln)
+            body = json.loads(raw.decode("utf-8"))
+    except Exception:
+        body = {}
+
+    status_code, ctype, data = handle_request(method, path, body)
+    status_line = {200: "200 OK", 404: "404 Not Found", 405: "405 Method Not Allowed"}.get(
+        status_code, "%d" % status_code)
+    start_response(status_line, [
+        ("Content-Type", ctype),
+        ("Content-Length", str(len(data))),
+        ("Cache-Control", "no-store"),
+    ])
+    return [data]
+
+
+# ---------------------------------------------------------------- 本地直跑
 def main():
-    threading.Thread(target=auto_loop, daemon=True).start()
-    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    from wsgiref.simple_server import make_server
+    start_auto_thread()
     log("服务已启动：http://%s:%d" % (HOST, PORT))
     print("工学云自动打卡服务已启动：http://%s:%d" % (HOST, PORT))
+    httpd = make_server(HOST, PORT, application)
     try:
-        srv.serve_forever()
+        httpd.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+# gunicorn --preload 时会在 fork 前执行到此处，用 atenable 钩子启动定时线程
+start_auto_thread()
 
 
 if __name__ == "__main__":
