@@ -5,3 +5,6 @@ __pycache__/
 *.log
 config.json
 *.apk
+*.zip
+*.keystore
+apk_out/
