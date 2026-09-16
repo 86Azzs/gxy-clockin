@@ -1,0 +1,27 @@
+name: Keep Render Awake
+
+# 定时保活：每 10 分钟访问一次 Render 服务，防止免费实例休眠
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping gxy-clockin service
+        run: |
+          URL="https://gxy-clockin.onrender.com/api/status"
+          echo "Pinging $URL"
+          code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 60 --max-time 90 "$URL")
+          echo "HTTP $code"
+          # 首次唤醒可能较慢，再试一次
+          if [ "$code" != "200" ]; then
+            sleep 20
+            code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 60 --max-time 90 "$URL")
+            echo "Retry HTTP $code"
+          fi
+          if [ "$code" != "200" ]; then
+            echo "服务未响应 (HTTP $code)"; exit 1
+          fi
