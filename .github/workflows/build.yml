@@ -8,13 +8,37 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: kivy/buildozer:latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Build APK
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git zip unzip python3-pip python3-venv autoconf libtool pkg-config zlib1g-dev libncurses5-dev libffi-dev cmake libssl-dev
+          pip3 install --upgrade buildozer cython
+
+      - name: Build APK (round 1: download toolchain)
+        run: |
+          buildozer android debug || echo "round1 done (license prompt expected)"
+
+      - name: Accept SDK licenses
+        run: |
+          SDKDIR="$HOME/.buildozer/android/platform/android-sdk"
+          mkdir -p "$SDKDIR/licenses"
+          printf '24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDKDIR/licenses/android-sdk-license"
+          SDKMGR=$(find "$SDKDIR" -name sdkmanager -type f 2>/dev/null | head -1)
+          if [ -n "$SDKMGR" ]; then
+            yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+          fi
+
+      - name: Build APK (round 2: finish build)
         run: |
           buildozer android debug
 
