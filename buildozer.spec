@@ -13,6 +13,7 @@ android.api = 33
 android.minapi = 21
 android.archs = arm64-v8a
 android.private_storage = True
+android.release_artifact = apk
 
 [buildozer]
 log_level = 2
