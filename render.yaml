@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: gxy-clockin
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --preload -w 1 -b 0.0.0.0:10000 server:application
+    envVars:
+      - key: GXY_PHONE
+        value: ""
+      - key: GXY_PASSWORD
+        value: ""
+      - key: GXY_TOKEN
+        value: ""
+      - key: GXY_ADDRESS
+        value: ""
+      - key: GXY_PROVINCE
+        value: ""
+      - key: GXY_CITY
+        value: ""
+      - key: GXY_LATITUDE
+        value: ""
+      - key: GXY_LONGITUDE
+        value: ""
+      - key: GXY_AUTO_ENABLE
+        value: "false"
+      - key: GXY_AUTO_START
+        value: "08:50"
+      - key: GXY_AUTO_END
+        value: "17:30"
