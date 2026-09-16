@@ -2,7 +2,9 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 jobs:
@@ -12,37 +14,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Install build dependencies
+      - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git zip unzip python3-pip python3-venv autoconf libtool pkg-config zlib1g-dev libncurses5-dev libffi-dev cmake libssl-dev
+          sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip python3-venv autoconf libtool pkg-config zlib1g-dev libncurses5-dev libffi-dev cmake libssl-dev
           pip3 install --upgrade buildozer cython
 
-      - name: Build APK (round 1: download toolchain)
+      - name: Build APK
         run: |
-          buildozer android debug || echo "round1 done (license prompt expected)"
-
-      - name: Accept SDK licenses
-        run: |
-          SDKDIR="$HOME/.buildozer/android/platform/android-sdk"
-          mkdir -p "$SDKDIR/licenses"
-          printf '24333f8a63b6825ea9c5514f83c2829b004d1fee\n' > "$SDKDIR/licenses/android-sdk-license"
-          SDKMGR=$(find "$SDKDIR" -name sdkmanager -type f 2>/dev/null | head -1)
-          if [ -n "$SDKMGR" ]; then
-            yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
-          fi
-
-      - name: Build APK (round 2: finish build)
-        run: |
+          buildozer android debug || true
+          find "$HOME/.buildozer" -name sdkmanager -type f | head -1 | while read s; do yes | "$s" --licenses || true; done
           buildozer android debug
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: gxy-apk
